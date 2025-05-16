@@ -119,26 +119,56 @@ class NeighborSampler:
         e_id[rev] = -e_id[rev] - 1
         return e_id
 
-    def random_walk(
-        self,
-        node_idx: Tensor,
-        direction: str,
-    ):
+
+    def random_walk(self, node_idx: Tensor, direction: str):
         """
         direction: "in", "out", "inout"
         """
+        # 1. Add bounds checking at the beginning
+        max_idx = self.whole_adj.sparse_sizes()[0] - 1
+        node_idx = torch.clamp(node_idx, 0, max_idx)
+        
         rowptr, col, e_id = self.whole_adj.csr()
         for _ in range(self.num_hops):
+            # 2. Ensure node_idx stays within bounds after each hop
+            node_idx = torch.clamp(node_idx, 0, max_idx)
+            
             row_start = rowptr[node_idx]
             row_end = rowptr[node_idx + 1]
-            idx = (torch.rand(node_idx.shape) * (row_end - row_start)).long() + row_start
+            
+            # 3. Check for valid rows before attempting to use them
+            valid_mask = row_start < row_end
+            if not valid_mask.any():
+                # 4. Handle the case when no valid nodes are found
+                return torch.zeros(1, dtype=torch.long, device=node_idx.device)
+            
+            # 5. Keep only valid nodes
+            node_idx = node_idx[valid_mask]
+            row_start = row_start[valid_mask]
+            row_end = row_end[valid_mask]
+            
+            # 6. Generate random offsets with device handling
+            rand_offset = torch.rand(node_idx.shape, device=node_idx.device)
+            idx = (rand_offset * (row_end - row_start)).long() + row_start
+            
+            # 7. Safety check for idx to prevent out-of-bounds
+            idx = torch.clamp(idx, 0, len(col) - 1)
+            
+            # 8. Get neighbor nodes
             node_idx = col[idx]
-            mask = row_start < row_end
+            
+            # 9. Improve direction filtering with safety checks
             if direction == "in":
-                mask = mask.logical_and(e_id[idx] < 0)
+                mask = e_id[idx] < 0
+                if not mask.any():
+                    return torch.zeros(1, dtype=torch.long, device=node_idx.device)
+                node_idx = node_idx[mask]
             elif direction == "out":
-                mask = mask.logical_and(e_id[idx] >= 0)
-            node_idx = node_idx[mask]
+                mask = e_id[idx] >= 0
+                if not mask.any():
+                    return torch.zeros(1, dtype=torch.long, device=node_idx.device)
+                node_idx = node_idx[mask]
+        
         return node_idx
 
 

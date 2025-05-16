@@ -20,7 +20,38 @@ class MAG240MSubgraphDataset(SubgraphDataset):
         return graph
 
 
-def get_mag240m_dataset(root, n_hop=2, **kwargs):
+def get_mag240m_dataset(root, n_hop=2, use_subset=False, subset_size=20000000, **kwargs):
+    if use_subset:
+        subset_path = os.path.join(root, "mag_subset", f"mag240m_subset_{subset_size}.pt")
+        subset_nodes_path = os.path.join(root, "mag_subset", f"mag240m_subset_{subset_size}_nodes.pt")
+        
+        if os.path.exists(subset_path):
+            print(f"Loading MAG240M subset from {subset_path}")
+            subset_graph = torch.load(subset_path)
+            
+            # Store original node mapping (important for tasks!)
+            if os.path.exists(subset_nodes_path):
+                orig_node_ids = torch.load(subset_nodes_path)
+                subset_graph.orig_node_ids = orig_node_ids  # Store original IDs
+                print(f"Loaded mapping for {len(orig_node_ids)} original nodes")
+            
+            # Create neighbor sampler for the subset
+            subset_adj_path = os.path.join(root, "mag_subset", f"mag240m_subset_{subset_size}_adj.pt")
+            
+            # Create the adjacency matrix cache file if it doesn't exist
+            if not os.path.exists(subset_adj_path):
+                print(f"Creating adjacency matrix cache for subset...")
+                graph_ns = Data(edge_index=subset_graph.edge_index, num_nodes=subset_graph.num_nodes)
+                neighbor_sampler = NeighborSamplerCacheAdj(subset_adj_path, graph_ns, n_hop)
+            else:
+                print(f"Using existing adjacency matrix cache for subset")
+                neighbor_sampler = NeighborSamplerCacheAdj(subset_adj_path, None, n_hop)
+            
+            print("Done loading MAG240M subset neighbor sampler.")
+            return MAG240MSubgraphDataset(subset_graph, neighbor_sampler)
+        else:
+            print(f"Subset file not found: {subset_path}. Using full dataset.")
+    # Original implementation
     dataset = MAG240MDataset(root)
 
     # Check if "mag240m_fts_adj_label.pt" exists, otherwise load
@@ -51,7 +82,53 @@ def get_mag240m_dataset(root, n_hop=2, **kwargs):
     return MAG240MSubgraphDataset(graph, neighbor_sampler)
 
 
-def mag240m_labels(split, node_split = "", root="dataset", remove_cs=True):
+def mag240m_labels(split, node_split="", root="dataset", remove_cs=True, use_subset=False, subset_size=20000000):
+    if use_subset:
+        # Load the original dataset to get paper labels
+        dataset = MAG240MDataset(root)
+        subset_path = os.path.join(root, "mag_subset", f"mag240m_subset_{subset_size}.pt")
+        subset_nodes_path = os.path.join(root, "mag_subset", f"mag240m_subset_{subset_size}_nodes.pt")
+        
+        if os.path.exists(subset_path) and os.path.exists(subset_nodes_path):
+            subset_nodes = torch.load(subset_nodes_path)
+            
+            # Get labels for the subset nodes
+            subset_labels = dataset.all_paper_label[subset_nodes]
+            
+            # Continue with the same label splitting logic
+            num_classes = dataset.num_classes
+
+            if remove_cs:
+                arxiv_labels = [0, 1, 3, 6, 9, 16, 17, 23, 24, 26,
+                              29, 39, 42, 47, 52, 57, 59, 63, 73, 77,
+                              79, 85, 86, 89, 94, 95, 105, 109, 114, 119,
+                              120, 122, 124, 130, 135, 137, 139, 147, 149, 152]
+                labels = list(set(range(num_classes)) - set(arxiv_labels))
+                additional = arxiv_labels
+            else:
+                labels = list(range(num_classes))
+                additional = []
+                
+            generator = random.Random(42)
+            generator.shuffle(labels)
+
+            test_val_length = 5
+            TEST_LABELS = labels[:test_val_length] + additional
+            VAL_LABELS = labels[test_val_length: test_val_length * 2] + additional
+            TRAIN_LABELS = labels[test_val_length * 2:]
+
+            if split == "train":
+                label_set = set(TRAIN_LABELS)
+            elif split == "val":
+                label_set = set(VAL_LABELS)
+            elif split == "test":
+                label_set = set(TEST_LABELS)
+            else:
+                raise ValueError(f"Invalid split: {split}")
+
+            return subset_labels, label_set, num_classes
+            
+    # Original implementation
     dataset = MAG240MDataset(root)
     num_classes = dataset.num_classes
 
@@ -99,12 +176,17 @@ def mag240m_labels(split, node_split = "", root="dataset", remove_cs=True):
     return label, label_set, num_classes
 
 
-def get_mag240m_dataloader(dataset, task_name, split, node_split, batch_size, n_way, n_shot, n_query, batch_count, root, num_workers, aug, aug_test, **kwargs):
+def get_mag240m_dataloader(dataset, task_name, split, node_split, batch_size, n_way, n_shot, n_query, batch_count, root, num_workers, aug, aug_test, use_subset=False, **kwargs):
     seed = sum(ord(c) for c in split)
     if split == "train" or aug_test:
         aug = get_aug(aug, dataset.graph.x)
     else:
         aug = get_aug("")
+        
+    # Check if we're using a subset with remapped indices
+    using_subset = hasattr(dataset.graph, 'orig_node_ids')
+    max_node_idx = dataset.graph.num_nodes - 1  # Ensure we stay within bounds
+    
     if task_name == "same_graph":
         neighbor_sampler = copy.copy(dataset.neighbor_sampler)
         neighbor_sampler.num_hops = 0
@@ -118,48 +200,18 @@ def get_mag240m_dataloader(dataset, task_name, split, node_split, batch_size, n_
     elif task_name == "neighbor_matching":
         neighbor_sampler = copy.copy(dataset.neighbor_sampler)
         neighbor_sampler.num_hops = 2
-        sampler = BatchSampler(
-            batch_count,
-            NeighborTask(neighbor_sampler, len(dataset), "inout"),
-            ParamSampler(batch_size, n_way, n_shot, n_query, 1),
-            seed=seed,
-        )
-        label_meta = torch.zeros(1, 768).expand(len(dataset), -1)
-    elif task_name == "classification":
-        labels, label_set, num_classes = mag240m_labels(split, root=root, remove_cs=True)
-        sampler = BatchSampler(
-            batch_count,
-            MulticlassTask(labels, label_set),
-            ParamSampler(batch_size, n_way, n_shot, n_query, 1),
-            seed=seed,
-        )
-        label_meta = torch.zeros(1, 768).expand(num_classes, -1)
-    # Classification and neighbor matching - multitask splitbatch
-    elif task_name.startswith("cls_nm"):
-        labels, label_set, num_classes = mag240m_labels(split, root=root)
-        neighbor_sampler = copy.copy(dataset.neighbor_sampler)
-        neighbor_sampler.num_hops = 2
         
-        if task_name.endswith("sb"):
-            task_base = MultiTaskSplitBatch([
-                MulticlassTask(labels, label_set),
-                NeighborTask(neighbor_sampler, len(dataset), "inout")
-            ], ["mct", "nt"], [1, 3])
-        elif task_name.endswith("sw"):
-            task_base = MultiTaskSplitWay([
-                MulticlassTask(labels, label_set), 
-                NeighborTask(neighbor_sampler, len(dataset), "inout")
-            ], ["mct", "nt"], split="even")
-        
+        # When using subset, make sure we only sample valid nodes
+        if using_subset:
+            print(f"Using subset for neighbor matching with {max_node_idx+1} nodes")
+            
         sampler = BatchSampler(
             batch_count,
-            task_base,
+            NeighborTask(neighbor_sampler, max_node_idx + 1, "inout"),
             ParamSampler(batch_size, n_way, n_shot, n_query, 1),
             seed=seed,
         )
-        label_meta = {}
-        label_meta["mct"] = torch.zeros(1, 768).expand(num_classes, -1)
-        label_meta["nt"] = torch.zeros(1, 768).expand(len(dataset), -1)
+        label_meta = torch.zeros(1, 768).expand(max_node_idx + 1, -1)
     else:
         raise ValueError(f"Unknown task for MAG240M: {task_name}")
     dataloader = DataLoader(dataset, batch_sampler=sampler, num_workers=num_workers, collate_fn=Collator(label_meta, aug=aug))

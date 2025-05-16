@@ -25,7 +25,8 @@ def get_params():
     args.add_argument("--reset_after_layer", default=None, nargs='+', type=int)
     args.add_argument("-original_features", "--original_features", default=False, type=bool)
     args.add_argument("-override_log", "--override_log", default=False, type=bool)
-
+    args.add_argument("-use_subset", "--use_subset", default=False, type=bool)
+    args.add_argument("-subset_size", "--subset_size", default=20000000, type=int)
 
     args.add_argument("-seed", "--seed", default=None, type=int)
 

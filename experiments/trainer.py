@@ -357,17 +357,19 @@ class TrainerFS():
         if "eval_only" in self.parameter and self.parameter["eval_only"]:
             print("Evaluation only - skipping training - exiting now")
             print("Note: also skipping evaluation of val set")
+            
+
+            with torch.no_grad():
+                # self.model.eval()
+                val_loss, val_acc, val_acc_std, val_aux_loss, ranks = self.do_eval(self.val_dataloader)
+                print("Validation loss: ", val_loss, "\nValidation accuracy: ", val_acc, "\nValidation std:", val_acc_std)
+                
+                start_log_dict = {"start_val_acc": val_acc, "start_val_acc_std": val_acc_std}
+                if ranks is not None:
+                    for key in ranks:
+                        start_log_dict["start_val_" + key] = ranks[key]
+                wandb.log(start_log_dict)  # Test accuracy before training (if using e.g. a pretrained model etc.)
             return
-
-        with torch.no_grad():
-            # self.model.eval()
-            val_loss, val_acc, val_acc_std, val_aux_loss, ranks = self.do_eval(self.val_dataloader)
-            start_log_dict = {"start_val_acc": val_acc, "start_val_acc_std": val_acc_std}
-            if ranks is not None:
-                for key in ranks:
-                    start_log_dict["start_val_" + key] = ranks[key]
-            wandb.log(start_log_dict)  # Test accuracy before training (if using e.g. a pretrained model etc.)
-
         for e in pbar:
             self.model.train()
 

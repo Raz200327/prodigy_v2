@@ -3,6 +3,8 @@
 *.json
 __pycache__
 
+
+*.out
 wandb/
 logs/
 log/
